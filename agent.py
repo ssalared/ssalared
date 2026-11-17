@@ -1,8 +1,48 @@
 #!/usr/bin/env python3
-"""Agent: turns natural-language (text or voice) tasks into shell commands and runs them on this machine.
+"""
+ایجنت هوش مصنوعی محلی — همه‌چیز در یک فایل
+=============================================
 
-Core needs only Python 3.8+. Voice mode extras: pip install faster-whisper sounddevice pyttsx3
-(or run: python agent.py --install-voice)
+چی هست؟
+  بهش به زبان خودت (فارسی یا انگلیسی، تایپی یا صوتی) می‌گی چی می‌خوای؛
+  خودش دستورات رو قدم‌به‌قدم می‌سازه و روی لپ‌تاپت اجرا می‌کنه.
+  برنامه‌نویسی و حل کد، مدیریت فایل‌ها، نصب و اجرای بازی‌ها و برنامه‌ها،
+  وب‌گردی، و هر ابزاری که لازم داشته باشه و روی سیستم نباشه رو خودش نصب می‌کنه.
+
+پیش‌نیاز:
+  فقط پایتون ۳.۸ به بالا (ویندوز / مک / لینوکس). هیچ نصب اضافه‌ای لازم نیست.
+  پکیج‌های حالت صوتی رو هم خودش موقع نیاز نصب می‌کنه.
+
+قدم ۱ — کلید API رایگان (یکی کافیه، ثبت‌نام رایگانه):
+  Google Gemini (پیشنهادی): https://aistudio.google.com/apikey
+  Groq:                     https://console.groq.com/keys
+  OpenRouter (مدل‌های free): https://openrouter.ai/settings/keys
+  Mistral:                  https://console.mistral.ai/api-keys
+
+قدم ۲ — ست کردن کلید:
+  ویندوز (PowerShell):  setx GEMINI_API_KEY "کلید-تو"   ← بعدش یه ترمینال جدید باز کن
+  لینوکس / مک:          export GEMINI_API_KEY="کلید-تو"
+
+قدم ۳ — اجرا:
+  python agent.py                    حالت متنی تعاملی (کارها رو یکی‌یکی بگو)
+  python agent.py -y                 حالت کاملاً خودکار: بدون تأیید، هر دستوری رو اجرا کنه
+  python agent.py --voice -y         حالت صوتی: حرف بزن، ایجنت گوش می‌ده و بلند جواب می‌ده
+  python agent.py "متن کار"          یک کار مشخص، همون لحظه
+
+گزینه‌ها:
+  -y / --yes        اجرای خودکار بدون تأیید هر دستور
+  --voice           حالت صوتی (ورودی میکروفون با Whisper آفلاین + جواب گفتاری با TTS)
+  --install-voice   نصب پکیج‌های صوتی (faster-whisper, sounddevice, pyttsx3)
+  -p PROVIDER       سرویس: gemini | groq | openrouter | mistral (پیش‌فرض gemini)
+  --model NAME      مدل دلخواه
+  --api-key KEY     کلید بدون متغیر محیطی
+  --timeout N       تایم‌اوت هر دستور به ثانیه (پیش‌فرض ۱۲۰)
+  --max-steps N     سقف مراحل هر کار (پیش‌فرض ۳۰)
+
+نکته امنیتی:
+  حالت پیش‌فرض قبل از اجرای هر دستور نشون می‌ده و تأیید می‌گیره.
+  با -y کنترل کامل به ایجنت می‌دی؛ روی کارهای حساس (پاک‌کردن فایل،
+  تغییر تنظیمات سیستم) حواست باشه و فقط کارهایی بده که خودت قبولشون هستی.
 """
 
 import argparse
