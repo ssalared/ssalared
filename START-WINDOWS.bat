@@ -12,13 +12,16 @@ if %errorlevel%==0 (set PY=python) else (
   )
 )
 echo ==============================
-echo   1 = Text mode (type tasks)
-echo   2 = Voice mode (speak, fully automatic)
+echo   1 = Website mode (chat page in your browser)
+echo   2 = Text mode (type tasks here)
+echo   3 = Voice mode (speak, fully automatic)
 echo ==============================
-set /p choice=Choose 1 or 2 and press Enter:
+set /p choice=Choose 1, 2 or 3 and press Enter:
 if "%choice%"=="2" (
+  %PY% agent.py
+) else if "%choice%"=="3" (
   %PY% agent.py --voice -y
 ) else (
-  %PY% agent.py
+  %PY% agent.py --web
 )
 pause

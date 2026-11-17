@@ -8,13 +8,16 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 echo "=============================="
-echo "  1 = Text mode (type tasks)"
-echo "  2 = Voice mode (speak, fully automatic)"
+echo "  1 = Website mode (chat page in your browser)"
+echo "  2 = Text mode (type tasks here)"
+echo "  3 = Voice mode (speak, fully automatic)"
 echo "=============================="
-printf "Choose 1 or 2 and press Enter: "
+printf "Choose 1, 2 or 3 and press Enter: "
 read -r choice
 if [ "$choice" = "2" ]; then
+  python3 agent.py
+elif [ "$choice" = "3" ]; then
   python3 agent.py --voice -y
 else
-  python3 agent.py
+  python3 agent.py --web
 fi

@@ -27,11 +27,16 @@
   python agent.py                    حالت متنی تعاملی (کارها رو یکی‌یکی بگو)
   python agent.py -y                 حالت کاملاً خودکار: بدون تأیید، هر دستوری رو اجرا کنه
   python agent.py --voice -y         حالت صوتی: حرف بزن، ایجنت گوش می‌ده و بلند جواب می‌ده
+  python agent.py --web              حالت وب: یه صفحه چت توی مرورگرت باز می‌شه
+                                     (آدرس: http://127.0.0.1:8765 — فقط از همین لپ‌تاپ
+                                     در دسترسه، کسی از بیرون نمی‌تونه ببینتش)
   python agent.py "متن کار"          یک کار مشخص، همون لحظه
 
 گزینه‌ها:
   -y / --yes        اجرای خودکار بدون تأیید هر دستور
   --voice           حالت صوتی (ورودی میکروفون با Whisper آفلاین + جواب گفتاری با TTS)
+  --web             حالت وب: رابط چت توی مرورگر (میکروفون مرورگر + جواب صوتی)
+  --port N          پورت حالت وب (پیش‌فرض 8765)
   --install-voice   نصب پکیج‌های صوتی (faster-whisper, sounddevice, pyttsx3)
   -p PROVIDER       سرویس: gemini | groq | openrouter | mistral (پیش‌فرض gemini)
   --model NAME      مدل دلخواه
@@ -41,22 +46,27 @@
 
 نکته امنیتی:
   حالت پیش‌فرض قبل از اجرای هر دستور نشون می‌ده و تأیید می‌گیره.
-  با -y کنترل کامل به ایجنت می‌دی؛ روی کارهای حساس (پاک‌کردن فایل،
-  تغییر تنظیمات سیستم) حواست باشه و فقط کارهایی بده که خودت قبولشون هستی.
+  با -y (یا تیک «اجرای خودکار» توی حالت وب) کنترل کامل به ایجنت می‌دی؛
+  روی کارهای حساس (پاک‌کردن فایل، تغییر تنظیمات سیستم) حواست باشه.
 """
 
 import argparse
+import http.server
 import json
 import os
 import platform
+import queue
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+import webbrowser
 
 MAX_OUTPUT_CHARS = 6000
 MAX_HISTORY_MESSAGES = 60
+WEB_PORT = 8765
 
 PRESETS = {
     "gemini": {
@@ -380,7 +390,6 @@ def record_audio(max_seconds=30):
             return None, samplerate
     if not frames:
         return None, samplerate
-    import numpy as np
     audio = np.concatenate(frames)[:, 0].astype("float32")
     return audio, samplerate
 
@@ -428,10 +437,321 @@ def voice_mode(args, api_key, base_url, model):
         run_task(args, text, api_key, base_url, model, reply_fn=voice_reply, speak=True)
 
 
+# ---------- web mode ----------
+
+INDEX_HTML = """<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>🤖 ایجنت</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#0f1117;color:#e6e6e6;font-family:Tahoma,Vazirmatn,sans-serif;height:100vh;display:flex;flex-direction:column}
+header{padding:10px 16px;background:#161a23;border-bottom:1px solid #262b38;display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+h1{font-size:16px;margin:0}
+label{font-size:13px;color:#9aa3b5;cursor:pointer;display:flex;align-items:center;gap:5px}
+#chat{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px}
+.msg{max-width:85%;padding:10px 14px;border-radius:12px;line-height:1.8;white-space:pre-wrap;word-break:break-word}
+.user{align-self:flex-start;background:#2b5278}
+.agent{align-self:flex-end;background:#243b2f}
+.cmd{align-self:flex-end;background:#1d2330;border:1px solid #31394d;font-family:Consolas,monospace;direction:ltr;text-align:left}
+.out{align-self:flex-end;background:#12151d;border:1px solid #262b38;font-family:Consolas,monospace;font-size:12px;direction:ltr;text-align:left;max-width:90%}
+.confirm{align-self:flex-end;background:#3a2b1d;border:1px solid #6b4e2e}
+.status{align-self:center;color:#8b93a7;font-size:12px;background:none}
+.confirm button{margin-inline-start:6px;cursor:pointer;border:0;border-radius:8px;padding:6px 14px;font-family:inherit}
+#bar{display:flex;gap:8px;padding:12px 16px;background:#161a23;border-top:1px solid #262b38}
+#task{flex:1;background:#0f1117;border:1px solid #31394d;color:#e6e6e6;border-radius:10px;padding:10px 14px;font-family:inherit;font-size:14px}
+button.act{cursor:pointer;border:0;border-radius:10px;padding:10px 16px;background:#2b5278;color:#fff;font-size:14px}
+#mic{background:#3a2b1d}
+#stop{background:#4a1f1f;margin-inline-start:auto}
+</style>
+</head>
+<body>
+<header>
+  <h1>🤖 ایجنت</h1>
+  <label><input type="checkbox" id="auto"> اجرای خودکار (بدون تأیید)</label>
+  <label><input type="checkbox" id="speak" checked> جواب صوتی</label>
+  <button class="act" id="stop">⏹ توقف</button>
+</header>
+<div id="chat"><div class="status">سلام! بگو چی می‌خوای. دکمه 🎤 برای حرف زدنه.</div></div>
+<div id="bar">
+  <button class="act" id="mic" title="حرف بزن">🎤</button>
+  <input id="task" placeholder="چی می‌خوای؟ مثلاً: پوشه Downloads رو مرتب کن">
+  <button class="act" id="send">بفرست</button>
+</div>
+<script>
+const chat = document.getElementById('chat');
+let es = null, busy = false;
+function add(cls, text){
+  const d = document.createElement('div');
+  d.className = 'msg ' + cls;
+  d.textContent = text;
+  chat.appendChild(d);
+  chat.scrollTop = chat.scrollHeight;
+  return d;
+}
+function say(t){
+  try{
+    const u = new SpeechSynthesisUtterance(t);
+    u.lang = 'fa-IR';
+    speechSynthesis.speak(u);
+  }catch(e){}
+}
+function listen(){
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if(!SR){ alert('مرورگرت از میکروفون پشتیبانی نمی‌کنه؛ از Chrome یا Edge استفاده کن'); return; }
+  const r = new SR();
+  r.lang = 'fa-IR';
+  r.interimResults = false;
+  r.onresult = e => { document.getElementById('task').value = e.results[0][0].transcript; };
+  r.onerror = e => { if(e.error === 'not-allowed') alert('اجازه دسترسی به میکروفون رو بده'); };
+  r.start();
+}
+function connect(){
+  es = new EventSource('/events');
+  es.onmessage = m => {
+    const ev = JSON.parse(m.data);
+    if(ev.type === 'command'){
+      add('cmd', '$ ' + ev.command);
+    } else if(ev.type === 'output'){
+      add('out', ev.text);
+    } else if(ev.type === 'confirm'){
+      const d = add('confirm', 'اجازه اجرای این دستور رو می‌دی؟\\n$ ' + ev.command);
+      const yes = document.createElement('button'); yes.textContent = 'اجازه بده';
+      const all = document.createElement('button'); all.textContent = 'همه رو اجازه بده';
+      const no  = document.createElement('button'); no.textContent = 'رد کن';
+      const answer = v => {
+        [yes, all, no].forEach(b => b.remove());
+        fetch('/confirm', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({value: v})});
+      };
+      yes.onclick = () => answer('yes');
+      all.onclick = () => answer('all');
+      no.onclick  = () => answer('no');
+      d.appendChild(yes); d.appendChild(all); d.appendChild(no);
+      chat.scrollTop = chat.scrollHeight;
+    } else if(ev.type === 'answer' || ev.type === 'done'){
+      add(ev.type === 'done' ? 'status' : 'agent', ev.text);
+      if(ev.type === 'answer' && document.getElementById('speak').checked) say(ev.text);
+      if(ev.type === 'done' && document.getElementById('speak').checked) say(ev.text);
+    } else if(ev.type === 'error'){
+      add('status', 'خطا: ' + ev.text);
+    } else if(ev.type === 'stopped'){
+      add('status', 'متوقف شد.');
+    } else if(ev.type === 'end'){
+      busy = false;
+      es.close();
+      connect();
+    }
+  };
+}
+async function send(){
+  const t = document.getElementById('task').value.trim();
+  if(!t || busy) return;
+  document.getElementById('task').value = '';
+  add('user', t);
+  busy = true;
+  const res = await fetch('/run', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({task: t, auto: document.getElementById('auto').checked})
+  });
+  if(res.status === 409){ add('status', 'یه کار در حال اجراست؛ صبر کن تموم شه.'); busy = false; }
+  else if(!res.ok){ add('status', 'شروع کار ناموفق بود.'); busy = false; }
+}
+document.getElementById('send').onclick = send;
+document.getElementById('task').addEventListener('keydown', e => { if(e.key === 'Enter') send(); });
+document.getElementById('mic').onclick = listen;
+document.getElementById('stop').onclick = () => fetch('/stop', {method:'POST'});
+connect();
+</script>
+</body>
+</html>
+"""
+
+STATE_LOCK = threading.Lock()
+STATE = {"job": None}
+
+
+class Job:
+    def __init__(self):
+        self.events = queue.Queue()
+        self.confirm_q = queue.Queue()
+        self.messages = []
+        self.auto = False
+        self.stop = False
+        self.active = False
+
+
+def web_loop(job, args, api_key, base_url, model):
+    def emit(ev):
+        job.events.put(ev)
+
+    try:
+        if not any(m.get("role") == "system" for m in job.messages):
+            job.messages.insert(0, {"role": "system", "content": build_system_prompt()})
+        for step in range(1, args.max_steps + 1):
+            if job.stop:
+                emit({"type": "stopped"})
+                return
+            content = chat(base_url, api_key, model, job.messages)
+            action = parse_action(content)
+            job.messages.append({"role": "assistant", "content": content})
+
+            if "command" in action:
+                cmd = str(action["command"])
+                if not cmd.strip():
+                    job.messages.append({"role": "user", "content": "The command was empty. Continue."})
+                    continue
+                if not job.auto:
+                    emit({"type": "confirm", "command": cmd})
+                    try:
+                        value = job.confirm_q.get(timeout=600)
+                    except queue.Empty:
+                        value = "no"
+                    if value == "all":
+                        job.auto = True
+                    if value not in ("yes", "all"):
+                        emit({"type": "status", "text": "دستور رد شد."})
+                        job.messages.append(
+                            {"role": "user", "content": "The user declined that command. Choose another approach or ask via \"answer\"."}
+                        )
+                        continue
+                emit({"type": "command", "command": cmd})
+                output = run_command(cmd, args.timeout)
+                emit({"type": "output", "text": output})
+                job.messages.append(
+                    {"role": "user", "content": f"command output:\n{output}\n\nContinue with the task."}
+                )
+                trim_history(job.messages)
+            elif "done" in action:
+                emit({"type": "done", "text": str(action["done"])})
+                return
+            else:
+                emit({"type": "answer", "text": str(action.get("answer", content))})
+                return
+        emit({"type": "answer", "text": "به سقف تعداد مراحل رسیدم؛ کار بعدی رو بفرست تا ادامه بدم."})
+    except SystemExit as exc:
+        emit({"type": "error", "text": str(exc)})
+    except Exception as exc:
+        emit({"type": "error", "text": f"{type(exc).__name__}: {exc}"})
+    finally:
+        job.active = False
+        emit({"type": "end"})
+
+
+class WebHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def _send(self, code, ctype, body):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path == "/":
+            self._send(200, "text/html; charset=utf-8", INDEX_HTML.encode("utf-8"))
+        elif self.path == "/events":
+            self.serve_events()
+        else:
+            self._send(404, "text/plain; charset=utf-8", b"not found")
+
+    def serve_events(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        try:
+            while True:
+                with STATE_LOCK:
+                    job = STATE["job"]
+                if job is not None:
+                    break
+                time.sleep(0.5)
+            while True:
+                try:
+                    ev = job.events.get(timeout=15)
+                except queue.Empty:
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                    continue
+                data = ("data: " + json.dumps(ev, ensure_ascii=False) + "\n\n").encode("utf-8")
+                self.wfile.write(data)
+                self.wfile.flush()
+                if ev.get("type") == "end":
+                    break
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            body = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+        except json.JSONDecodeError:
+            body = {}
+
+        if self.path == "/run":
+            task = str(body.get("task", "")).strip()
+            if not task:
+                self._send(400, "application/json", b'{"error": "empty task"}')
+                return
+            with STATE_LOCK:
+                job = STATE["job"]
+                if job is not None and job.active:
+                    self._send(409, "application/json", b'{"error": "busy"}')
+                    return
+                if job is None:
+                    job = Job()
+                    STATE["job"] = job
+                job.active = True
+                job.stop = False
+                job.auto = bool(body.get("auto"))
+                job.messages.append({"role": "user", "content": task})
+            threading.Thread(
+                target=web_loop,
+                args=(job, self.server.args, self.server.api_key, self.server.base_url, self.server.model),
+                daemon=True,
+            ).start()
+            self._send(200, "application/json", b'{"ok": true}')
+        elif self.path == "/confirm":
+            with STATE_LOCK:
+                job = STATE["job"]
+            if job:
+                job.confirm_q.put(str(body.get("value", "no")))
+            self._send(200, "application/json", b'{"ok": true}')
+        elif self.path == "/stop":
+            with STATE_LOCK:
+                job = STATE["job"]
+            if job:
+                job.stop = True
+            self._send(200, "application/json", b'{"ok": true}')
+        else:
+            self._send(404, "text/plain; charset=utf-8", b"not found")
+
+
+def web_mode(args, api_key, base_url, model):
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", args.port), WebHandler)
+    httpd.args = args
+    httpd.api_key = api_key
+    httpd.base_url = base_url
+    httpd.model = model
+    url = f"http://127.0.0.1:{args.port}"
+    print(f"web UI ready: {url}   (Ctrl+C to stop)")
+    print("this page is only reachable from this laptop (127.0.0.1).")
+    threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\nbye.")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="agent",
-        description="Local agent that turns natural-language (text or voice) tasks into shell commands and runs them on this machine.",
+        description="Local agent that turns natural-language (text, voice, or web chat) tasks into shell commands and runs them on this machine.",
     )
     parser.add_argument(
         "task",
@@ -447,6 +767,17 @@ def main():
         "--voice",
         action="store_true",
         help="voice mode: speak tasks through the microphone, agent answers out loud",
+    )
+    parser.add_argument(
+        "--web",
+        action="store_true",
+        help="web mode: chat UI in your browser at http://127.0.0.1:8765",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=WEB_PORT,
+        help="port for web mode (default 8765)",
     )
     parser.add_argument(
         "--install-voice",
@@ -483,7 +814,9 @@ def main():
             f"or pass it once: python agent.py --api-key \"your-key\" \"task\""
         )
 
-    if args.voice:
+    if args.web:
+        web_mode(args, api_key, base_url, model)
+    elif args.voice:
         voice_mode(args, api_key, base_url, model)
     elif args.task:
         run_task(args, " ".join(args.task), api_key, base_url, model, interactive=False)
